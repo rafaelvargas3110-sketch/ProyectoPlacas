@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Consulta de Placas Vehiculares</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; background:#f4f4f9; display:flex; flex-direction:column; min-height:100vh; }
+    .container { max-width:950px; margin:30px auto; background:#fff; padding:25px; border-radius:10px; box-shadow:0 4px 8px rgba(0,0,0,0.1); flex:1; }
+    h1,h2 { color:#333; text-align:center; }
+    input[type="file"]{ display:block; margin-bottom:15px; padding:10px; border:1px solid #ccc; border-radius:4px; width:100%; box-sizing:border-box;}
+    button{ background:#007bff; color:#fff; padding:10px 15px; border:none; border-radius:4px; cursor:pointer; width:100%; font-size:16px; }
+    button:hover{ background:#0056b3; }
+    #results{ margin-top:25px; padding:15px; border:1px solid #ddd; border-radius:8px; background:#e9ecef; min-height:60px; }
+    .image-container{ display:flex; justify-content:center; gap:20px; margin-top:15px; flex-wrap:wrap; }
+    .image-container img{ max-width:300px; border-radius:8px; border:2px solid #ccc; }
+    .highlight{ color:#dc3545; font-weight:bold; font-size:1.2em; }
+    #loadingImage{ display:none; margin:20px auto; width:150px; border-radius:8px; border:2px solid #007bff; }
+
+    /* Tabla */
+    table{ width:100%; border-collapse:collapse; margin-top:25px; }
+    th,td{ padding:10px; border:1px solid #ccc; text-align:center; vertical-align:middle;}
+    th{ background:#007bff; color:#fff; }
+    tr:nth-child(even){ background:#f2f2f2; }
+    td[contenteditable="true"]{ background:#fff9c4; cursor:text; }
+
+    .btn-small{ background:#dc3545; color:#fff; border:none; padding:6px 10px; border-radius:5px; cursor:pointer; }
+    .btn-small:hover{ background:#b02a37; }
+
+    .btn-export{ background:#28a745; color:#fff; margin-bottom:10px; padding:8px 15px; border-radius:6px; border:none; cursor:pointer; float:right; }
+    .btn-export:hover{ background:#1e7e34; }
+
+    /* Modal */
+    .modal-overlay { display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.6); justify-content:center; align-items:center; z-index:1000; }
+    .modal-content { background:#fff; padding:20px; border-radius:10px; width:400px; text-align:center; box-shadow:0 4px 8px rgba(0,0,0,0.3); }
+    .modal-content button { width:auto; padding:8px 15px; margin:10px 5px; font-size:15px; }
+    .btn-cerrar{ background:#6c757d; }
+    .btn-cerrar:hover{ background:#5a6268; }
+
+    footer{ text-align:center; padding:15px 10px; background:#343a40; color:#fff; font-size:14px; border-top:3px solid #007bff; }
+    footer a{ color:#0dcaf0; text-decoration:none; font-weight:bold; }
+    footer a:hover{ text-decoration:underline; }
+
+    .flex-row{ display:flex; gap:10px; align-items:center; justify-content:flex-end; }
+    .btn-link { background:#17a2b8; border:none; border-radius:6px; color:white; padding:10px 15px; cursor:pointer; font-size:15px; width:150px; }
+    .btn-link:hover { background:#117a8b; }
+    .link-container { display:flex; justify-content:center; gap:20px; margin-top:15px; flex-wrap:wrap; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Detector y Consultor de Placas 🚗</h1>
+
+    <input type="file" id="imageInput" accept="image/*">
+    <button onclick="uploadImage()">Detectar y Consultar</button>
+
+    <!-- ✅ Imagen cargada desde /static/imagenes -->
+    <img id="loadingImage" src="{{ url_for('static', filename='imagenes/tung.jpeg') }}" alt="Procesando..." />
+
+    <h2>Resultados:</h2>
+    <div id="results">Esperando imagen...</div>
+
+    <div class="image-container" id="imageContainer" style="display:none;">
+      <div>
+        <h4>📸 Placa Detectada</h4>
+        <img id="detectedPlateImg" src="" alt="Placa detectada">
+      </div>
+      <div>
+        <h4>🚙 Imagen Referencial</h4>
+        <img id="vehicleImage" src="" alt="Vehículo referencial">
+      </div>
+    </div>
+
+    <!-- 🔗 ENLACES A PORTALES OFICIALES -->
+    <h2>Para más información:</h2>
+    <div class="link-container">
+      <button class="btn-link" onclick="window.open('https://consultavehicular.sunarp.gob.pe/consulta-vehicular/inicio', '_blank')">🌐 SUNARP</button>
+      <button class="btn-link" onclick="window.open('https://www.sat.gob.pe/VirtualSAT/principal.aspx', '_blank')">💰 SAT</button>
+    </div>
+
+    <h2>📋 Historial de Consultas</h2>
+    <div class="flex-row">
+      <button class="btn-export" onclick="exportarCSV()">⬇️ Exportar CSV</button>
+    </div>
+
+    <table id="tablaHistorial">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Placa</th>
+          <th>Marca</th>
+          <th>Modelo</th>
+          <th>Uso</th>
+          <th>Propietario</th>
+          <th>Fecha</th>
+          <th>Observaciones</th>
+          <th>Acción</th>
+        </tr>
+      </thead>
+      <tbody><tr><td colspan="9">Cargando...</td></tr></tbody>
+    </table>
+
+    <h2>🚨 Reportar Vehículo Sospechoso</h2>
+    <button onclick="abrirModal()">Registrar Reporte</button>
+  </div>
+
+  <!-- MODAL REPORTE -->
+  <div id="modalReporte" class="modal-overlay">
+    <div class="modal-content">
+      <h3>🚨 Reportar Vehículo Sospechoso</h3>
+      <input id="placaReporte" type="text" placeholder="Ej: ABC123">
+      <textarea id="descripcionReporte" rows="4" placeholder="Motivo del reporte"></textarea>
+      <div style="display:flex; gap:8px; justify-content:center;">
+        <button onclick="enviarReporte()">Guardar</button>
+        <button class="btn-cerrar" onclick="cerrarModal()">Cerrar</button>
+      </div>
+      <p id="mensajeReporte" style="margin-top:10px;"></p>
+    </div>
+  </div>
+
+  <!-- MODAL ELIMINAR -->
+  <div id="modalConfirm" class="modal-overlay">
+    <div class="modal-content">
+      <h3>🗑️ Confirmar Eliminación</h3>
+      <p>¿Seguro que deseas eliminar este registro?</p>
+      <div style="display:flex; justify-content:center; gap:10px;">
+        <button id="confirmYes" style="background:#dc3545;">Sí, eliminar</button>
+        <button class="btn-cerrar" onclick="cerrarModalConfirm()">Cancelar</button>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <p>Desarrollado por <strong>Rafael Vargas Gonzales</strong> © <span id="year"></span></p>
+    <p>Cibertec — Proyecto de Detección y Consulta de Placas Vehiculares</p>
+    <p>Contacto: <a href="mailto:rafaelvg31@gmail.com">rafaelvg31@gmail.com</a></p>
+  </footer>
+
+  <script>
+    const API_BASE = "{{ url_for('index') }}".replace(/\/$/, ""); // Se ajusta dinámicamente a tu dominio o localhost
+    let idAEliminar = null;
+
+    async function uploadImage() {
+      const input = document.getElementById("imageInput");
+      const resultsDiv = document.getElementById("results");
+      const vehicleImg = document.getElementById("vehicleImage");
+      const detectedImg = document.getElementById("detectedPlateImg");
+      const loadingImage = document.getElementById("loadingImage");
+      const imageContainer = document.getElementById("imageContainer");
+
+      imageContainer.style.display = "none";
+      resultsDiv.innerHTML = "⏳ Procesando...";
+      loadingImage.style.display = "block";
+
+      const file = input.files[0];
+      if (!file) { resultsDiv.innerHTML = '<p style="color:red;">Selecciona una imagen.</p>'; loadingImage.style.display="none"; return; }
+
+      const formData = new FormData();
+      formData.append("image", file);
+
+      try {
+        const res = await fetch(`${API_BASE}/api/detect_plate`, { method:"POST", body: formData });
+        const data = await res.json();
+        loadingImage.style.display = "none";
+
+        if (res.ok) {
+          const estado = data.estado_legal.estado || "";
+          resultsDiv.innerHTML = `
+            <p><strong>Placa Detectada:</strong> <span class="highlight">${data.placa_detectada}</span></p>
+            <p><strong>Detalles:</strong> ${estado}</p>
+          `;
+
+          imageContainer.style.display = "flex";
+          if (data.placa_imagen) detectedImg.src = "data:image/jpeg;base64," + data.placa_imagen;
+          if (data.estado_legal.imagen_url) vehicleImg.src = data.estado_legal.imagen_url;
+
+          if (estado.includes("ALERTA")) {
+            const alerta = document.createElement("div");
+            alerta.style.background="#ff4d4d"; alerta.style.color="white"; alerta.style.padding="12px"; alerta.style.borderRadius="8px"; alerta.style.marginTop="10px";
+            alerta.textContent = "⚠️ Este vehículo está reportado como sospechoso.";
+            resultsDiv.appendChild(alerta);
+          }
+          cargarHistorial();
+        } else {
+          resultsDiv.innerHTML = `<p style="color:red;">❌ ${data.error || data.message}</p>`;
+        }
+      } catch (err) {
+        loadingImage.style.display = "none";
+        resultsDiv.innerHTML = `<p style="color:red;">❌ Error al conectar con el servidor.</p>`;
+        console.error(err);
+      }
+    }
+
+    async function cargarHistorial() {
+      const tbody = document.querySelector("#tablaHistorial tbody");
+      tbody.innerHTML = "<tr><td colspan='9'>Cargando...</td></tr>";
+      try {
+        const res = await fetch(`${API_BASE}/api/historial`);
+        const data = await res.json();
+        if (data.status === "success" && data.historial.length) {
+          tbody.innerHTML = "";
+          data.historial.forEach(row => {
+            const tr = document.createElement("tr");
+            tr.innerHTML = `
+              <td>${row.id}</td>
+              <td>${row.placa}</td>
+              <td>${row.marca}</td>
+              <td>${row.modelo}</td>
+              <td>${row.uso}</td>
+              <td>${row.propietario}</td>
+              <td>${row.fecha_consulta}</td>
+              <td contenteditable="true" onblur="actualizarObservacion(${row.id}, this.textContent)">${row.observaciones || ""}</td>
+              <td><button class="btn-small" onclick="mostrarModalEliminar(${row.id})">Eliminar</button></td>
+            `;
+            tbody.appendChild(tr);
+          });
+        } else {
+          tbody.innerHTML = "<tr><td colspan='9'>No hay registros.</td></tr>";
+        }
+      } catch (e) {
+        tbody.innerHTML = "<tr><td colspan='9' style='color:red;'>Error al cargar historial.</td></tr>";
+        console.error(e);
+      }
+    }
+
+    async function actualizarObservacion(id, texto) {
+      try {
+        await fetch(`${API_BASE}/api/observacion/${id}`, {
+          method: "PUT",
+          headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({ observacion: texto })
+        });
+      } catch (e) { console.error("Error guardando observación:", e); }
+    }
+
+    function mostrarModalEliminar(id) {
+      idAEliminar = id;
+      document.getElementById("modalConfirm").style.display = "flex";
+    }
+
+    function cerrarModalConfirm() {
+      document.getElementById("modalConfirm").style.display = "none";
+      idAEliminar = null;
+    }
+
+    document.getElementById("confirmYes").onclick = async function() {
+      if (idAEliminar) {
+        try {
+          await fetch(`${API_BASE}/api/historial/${idAEliminar}`, { method:"DELETE" });
+          cerrarModalConfirm();
+          cargarHistorial();
+        } catch (e) {
+          alert("Error al eliminar el registro.");
+          console.error(e);
+        }
+      }
+    }
+
+    function exportarCSV(){ window.open(`${API_BASE}/api/historial/exportar`, "_blank"); }
+
+    function abrirModal(){ document.getElementById("modalReporte").style.display = "flex"; }
+    function cerrarModal(){ document.getElementById("modalReporte").style.display = "none"; document.getElementById("mensajeReporte").textContent=""; }
+
+    async function enviarReporte(){
+      const placa = document.getElementById("placaReporte").value.trim().toUpperCase();
+      const descripcion = document.getElementById("descripcionReporte").value.trim();
+      const msg = document.getElementById("mensajeReporte");
+      if (!placa || !descripcion) { msg.style.color="red"; msg.textContent="Debes ingresar placa y descripción."; return; }
+      try {
+        const res = await fetch(`${API_BASE}/api/reportar`, {
+          method:"POST",
+          headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({ placa, descripcion })
+        });
+        const data = await res.json();
+        msg.style.color = res.ok ? "green":"red";
+        msg.textContent = data.message || "Error";
+        if (res.ok) { cerrarModal(); cargarHistorial(); }
+      } catch (e) {
+        msg.style.color="red"; msg.textContent="Error al conectar con servidor.";
+        console.error(e);
+      }
+    }
+
+    document.getElementById("year").textContent = new Date().getFullYear();
+    cargarHistorial();
+  </script>
+</body>
+</html>
