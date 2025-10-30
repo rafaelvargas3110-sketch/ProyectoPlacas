@@ -22,10 +22,10 @@ app = Flask(__name__, template_folder=TEMPLATES_DIR, static_folder=STATIC_DIR)
 CORS(app)
 
 URL_API_PERU = "https://www.regcheck.org.uk/api/reg.asmx/CheckPeru"
-API_USERNAME = "Rafael31"
+API_USERNAME = "Rafael31" # <-- RECUERDA: Mover esto a variables de entorno
 
 # === BASE DE DATOS ===
-DB_PATH = os.path.join(BASE_DIR, "placas.db")
+DB_PATH = os.path.join(BASE_DIR, "placas.db") # <-- RECUERDA: Esto se borrará en Render
 
 def inicializar_db():
     conn = sqlite3.connect(DB_PATH)
@@ -91,15 +91,29 @@ def actualizar_observacion(id_registro, observacion):
 
 inicializar_db()
 
-# === CARGA DE MODELOS ===
-try:
-    MODELO_DETECTOR = YOLO(os.path.join(BASE_DIR, "best.pt")) # <--- AQUÍ
-    OCR_READER = PaddleOCR(use_textline_orientation=True, lang="en")
-    print("✅ Modelos cargados correctamente.")
-except Exception as e:
-    print(f"❌ ERROR al cargar modelos: {e}") # <--- Este error está en tus logs
-    MODELO_DETECTOR = None
-    OCR_READER = None
+# === CARGA DE MODELOS (Lazy Loading) ===
+# (Esto ya lo tenías correcto)
+MODELO_DETECTOR = None
+OCR_READER = None
+
+def cargar_modelos():
+    """Carga los modelos en memoria en la primera petición."""
+    global MODELO_DETECTOR, OCR_READER
+    
+    # Solo carga si aún no están en memoria
+    if MODELO_DETECTOR is None or OCR_READER is None:
+        print("Iniciando carga de modelos (esto puede tardar)...")
+        try:
+            MODELO_DETECTOR = YOLO(os.path.join(BASE_DIR, "best.pt"))
+            OCR_READER = PaddleOCR(use_textline_orientation=True, lang="en")
+            print("✅ Modelos cargados correctamente.")
+        except Exception as e:
+            print(f"❌ ERROR al cargar modelos: {e}")
+            # Asegurarse de que sigan siendo None si falla
+            MODELO_DETECTOR = None
+            OCR_READER = None
+    
+    return MODELO_DETECTOR, OCR_READER
 
 # === CONSULTA API REGCHECK ===
 def consultar_estado_legal(placa_detectada):
@@ -141,12 +155,26 @@ def index():
 def imagenes(filename):
     return send_from_directory(os.path.join(STATIC_DIR, "imagenes"), filename)
 
+# ---
+# --- SECCIÓN MODIFICADA ---
+# ---
 @app.route('/api/detect_plate', methods=['POST'])
 def detect_plate():
+    
+    # --- MODIFICACIÓN 1: Llamar a la función de carga ---
+    # Esto cargará los modelos solo en la primera petición
+    detector, ocr = cargar_modelos()
+    
+    # --- MODIFICACIÓN 2: Verificar el resultado de la carga ---
+    if detector is None or ocr is None:
+        return jsonify({"status": "error", "error": "Modelos no cargados o fallando al cargar."}), 503
+
     if 'image' not in request.files:
         return jsonify({"status": "error", "error": "No se encontró archivo de imagen."}), 400
-    if MODELO_DETECTOR is None or OCR_READER is None:
-        return jsonify({"status": "error", "error": "Modelos no cargados correctamente."}), 503
+    
+    # --- MODIFICACIÓN 3: Se eliminó el check original ---
+    # (El 'if MODELO_DETECTOR is None...' original se borró 
+    # porque ahora lo manejamos arriba)
 
     image_file = request.files['image']
     try:
@@ -157,7 +185,9 @@ def detect_plate():
             return jsonify({"status": "fail", "message": "No se pudo decodificar la imagen."}), 400
 
         image = cv2.resize(image, (1280, 720))
-        results = MODELO_DETECTOR.predict(image, verbose=False, conf=0.5)
+        
+        # --- MODIFICACIÓN 4: Usar la variable local 'detector' ---
+        results = detector.predict(image, verbose=False, conf=0.5)
 
         detected_plate = "PLACA_NO_ENCONTRADA"
         placa_base64 = None
@@ -167,7 +197,9 @@ def detect_plate():
                 box = r.boxes[0].xyxy[0].cpu().numpy().astype(int)
                 x1, y1, x2, y2 = box
                 plate_roi = image[y1:y2, x1:x2]
-                result = OCR_READER.ocr(plate_roi)
+                
+                # --- MODIFICACIÓN 5: Usar la variable local 'ocr' ---
+                result = ocr.ocr(plate_roi)
                 _, buffer = cv2.imencode('.jpg', plate_roi)
                 placa_base64 = base64.b64encode(buffer).decode('utf-8')
 
@@ -203,6 +235,9 @@ def detect_plate():
 
     except Exception as e:
         return jsonify({"status": "error", "error": f"Error interno del servidor: {e}"}), 500
+# ---
+# --- FIN DE SECCIÓN MODIFICADA ---
+# ---
 
 @app.route('/api/historial', methods=['GET'])
 def historial():
