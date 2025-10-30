@@ -3,7 +3,6 @@ import cv2
 import json
 import base64
 import requests
-import sqlite3
 import numpy as np
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -11,6 +10,12 @@ from flask import Flask, request, jsonify, render_template, send_from_directory
 from flask_cors import CORS
 from ultralytics import YOLO
 from paddleocr import PaddleOCR
+
+# --- NUEVAS IMPORTACIONES PARA POSTGRES (SQLAlchemy) ---
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, UniqueConstraint
+from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.pool import QueuePool
+from contextlib import contextmanager
 
 # === CONFIGURACIÓN DE RUTAS ===
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -21,78 +26,116 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 app = Flask(__name__, template_folder=TEMPLATES_DIR, static_folder=STATIC_DIR)
 CORS(app)
 
+# Leemos desde variables de entorno
+API_USERNAME = os.environ.get("API_USERNAME", "Rafael31") 
 URL_API_PERU = "https://www.regcheck.org.uk/api/reg.asmx/CheckPeru"
-API_USERNAME = "Rafael31" # <-- RECUERDA: Mover esto a variables de entorno
 
-# === BASE DE DATOS ===
-DB_PATH = os.path.join(BASE_DIR, "placas.db") # <-- RECUERDA: Esto se borrará en Render
 
+# --- NUEVA CONFIGURACIÓN DE BASE DE DATOS (PostgreSQL) ---
+DATABASE_URL = os.environ.get('DATABASE_URL')
+if not DATABASE_URL:
+    # Esto es importante para saber si Render cargó la variable
+    print("ALERTA: DATABASE_URL no está configurada.")
+    # Fallará aquí si la variable no existe
+    raise RuntimeError("DATABASE_URL no está configurada.")
+
+# SQLAlchemy usa 'postgresql' en lugar de 'postgres' en la URL de Render
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+# Creamos el "motor" de la base de datos
+engine = create_engine(DATABASE_URL, poolclass=QueuePool, pool_size=5, max_overflow=10)
+Base = declarative_base()
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# --- DEFINICIÓN DE MODELOS (Tablas) ---
+class Consulta(Base):
+    __tablename__ = "consultas"
+    id = Column(Integer, primary_key=True, index=True)
+    placa = Column(String(50), index=True)
+    marca = Column(String(100))
+    modelo = Column(String(100))
+    uso = Column(String(100))
+    propietario = Column(String(255))
+    imagen_url = Column(String(500))
+    fecha_consulta = Column(DateTime, default=datetime.now)
+    observaciones = Column(Text, default='')
+
+class Reporte(Base):
+    __tablename__ = "reportes"
+    id = Column(Integer, primary_key=True, index=True)
+    placa = Column(String(50), unique=True, index=True)
+    descripcion = Column(Text, nullable=False)
+    fecha_reporte = Column(DateTime, default=datetime.now)
+    __table_args__ = (UniqueConstraint('placa', name='uq_placa'),)
+
+# --- FUNCIÓN PARA MANEJAR SESIONES DE BD ---
+@contextmanager
+def get_db_session():
+    """Maneja de forma segura las sesiones de la base de datos."""
+    db = SessionLocal()
+    try:
+        yield db
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+# --- FUNCIONES DE BASE DE DATOS REESCRITAS ---
 def inicializar_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS consultas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            placa TEXT,
-            marca TEXT,
-            modelo TEXT,
-            uso TEXT,
-            propietario TEXT,
-            imagen_url TEXT,
-            fecha_consulta TEXT,
-            observaciones TEXT DEFAULT ''
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS reportes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            placa TEXT UNIQUE,
-            descripcion TEXT,
-            fecha_reporte TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    """Crea las tablas en la base de datos si no existen."""
+    try:
+        Base.metadata.create_all(bind=engine)
+        print("✅ Tablas de la base de datos verificadas/creadas.")
+    except Exception as e:
+        print(f"❌ Error al inicializar la base de datos: {e}")
 
 def guardar_consulta(placa, marca, modelo, uso, propietario, imagen_url):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO consultas (placa, marca, modelo, uso, propietario, imagen_url, fecha_consulta)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (placa, marca, modelo, uso, propietario, imagen_url, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    conn.commit()
-    conn.close()
+    with get_db_session() as db:
+        nueva_consulta = Consulta(
+            placa=placa,
+            marca=marca,
+            modelo=modelo,
+            uso=uso,
+            propietario=propietario,
+            imagen_url=imagen_url,
+            fecha_consulta=datetime.now()
+        )
+        db.add(nueva_consulta)
+        db.commit()
 
 def verificar_reporte(placa):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT descripcion FROM reportes WHERE placa = ?", (placa,))
-    reporte = cursor.fetchone()
-    conn.close()
-    return reporte[0] if reporte else None
+    with get_db_session() as db:
+        reporte = db.query(Reporte).filter(Reporte.placa == placa).first()
+        return reporte.descripcion if reporte else None
 
 def guardar_reporte(placa, descripcion):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT OR REPLACE INTO reportes (placa, descripcion, fecha_reporte)
-        VALUES (?, ?, ?)
-    ''', (placa, descripcion, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    conn.commit()
-    conn.close()
+    with get_db_session() as db:
+        reporte_existente = db.query(Reporte).filter(Reporte.placa == placa).first()
+        if reporte_existente:
+            reporte_existente.descripcion = descripcion
+            reporte_existente.fecha_reporte = datetime.now()
+        else:
+            nuevo_reporte = Reporte(
+                placa=placa,
+                descripcion=descripcion,
+                fecha_reporte=datetime.now()
+            )
+            db.add(nuevo_reporte)
+        db.commit()
 
 def actualizar_observacion(id_registro, observacion):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE consultas SET observaciones = ? WHERE id = ?", (observacion, id_registro))
-    conn.commit()
-    conn.close()
+    with get_db_session() as db:
+        consulta = db.query(Consulta).filter(Consulta.id == id_registro).first()
+        if consulta:
+            consulta.observaciones = observacion
+            db.commit()
 
+# Llama a esta función UNA VEZ al iniciar la app
 inicializar_db()
 
 # === CARGA DE MODELOS (Lazy Loading) ===
-# (Esto ya lo tenías correcto)
 MODELO_DETECTOR = None
 OCR_READER = None
 
@@ -100,7 +143,6 @@ def cargar_modelos():
     """Carga los modelos en memoria en la primera petición."""
     global MODELO_DETECTOR, OCR_READER
     
-    # Solo carga si aún no están en memoria
     if MODELO_DETECTOR is None or OCR_READER is None:
         print("Iniciando carga de modelos (esto puede tardar)...")
         try:
@@ -109,7 +151,6 @@ def cargar_modelos():
             print("✅ Modelos cargados correctamente.")
         except Exception as e:
             print(f"❌ ERROR al cargar modelos: {e}")
-            # Asegurarse de que sigan siendo None si falla
             MODELO_DETECTOR = None
             OCR_READER = None
     
@@ -141,9 +182,13 @@ def consultar_estado_legal(placa_detectada):
         owner = vehicle_data.get('Owner', 'No disponible')
         image_url = vehicle_data.get('ImageUrl', None)
         estado = f"✅ Marca: {make}, Modelo: {model}, Año: {year}, Uso: {use_type}, VIN: {vin}, Propietario: {owner}"
+        
+        # Guardar en la nueva base de datos Postgres
         guardar_consulta(placa_detectada, make, model, use_type, owner, image_url)
+        
         return {"estado": estado, "imagen_url": image_url}
     except Exception as e:
+        print(f"❌ Error en consultar_estado_legal: {e}")
         return {"estado": f"⚠ Error conectando con RegCheck: {e}", "imagen_url": None}
 
 # === RUTAS FLASK ===
@@ -155,27 +200,17 @@ def index():
 def imagenes(filename):
     return send_from_directory(os.path.join(STATIC_DIR, "imagenes"), filename)
 
-# ---
-# --- SECCIÓN MODIFICADA ---
-# ---
 @app.route('/api/detect_plate', methods=['POST'])
 def detect_plate():
     
-    # --- MODIFICACIÓN 1: Llamar a la función de carga ---
-    # Esto cargará los modelos solo en la primera petición
     detector, ocr = cargar_modelos()
     
-    # --- MODIFICACIÓN 2: Verificar el resultado de la carga ---
     if detector is None or ocr is None:
         return jsonify({"status": "error", "error": "Modelos no cargados o fallando al cargar."}), 503
 
     if 'image' not in request.files:
         return jsonify({"status": "error", "error": "No se encontró archivo de imagen."}), 400
     
-    # --- MODIFICACIÓN 3: Se eliminó el check original ---
-    # (El 'if MODELO_DETECTOR is None...' original se borró 
-    # porque ahora lo manejamos arriba)
-
     image_file = request.files['image']
     try:
         image_bytes = image_file.read()
@@ -185,8 +220,6 @@ def detect_plate():
             return jsonify({"status": "fail", "message": "No se pudo decodificar la imagen."}), 400
 
         image = cv2.resize(image, (1280, 720))
-        
-        # --- MODIFICACIÓN 4: Usar la variable local 'detector' ---
         results = detector.predict(image, verbose=False, conf=0.5)
 
         detected_plate = "PLACA_NO_ENCONTRADA"
@@ -197,8 +230,6 @@ def detect_plate():
                 box = r.boxes[0].xyxy[0].cpu().numpy().astype(int)
                 x1, y1, x2, y2 = box
                 plate_roi = image[y1:y2, x1:x2]
-                
-                # --- MODIFICACIÓN 5: Usar la variable local 'ocr' ---
                 result = ocr.ocr(plate_roi)
                 _, buffer = cv2.imencode('.jpg', plate_roi)
                 placa_base64 = base64.b64encode(buffer).decode('utf-8')
@@ -234,71 +265,89 @@ def detect_plate():
         })
 
     except Exception as e:
+        print(f"❌ Error en detect_plate: {e}") 
         return jsonify({"status": "error", "error": f"Error interno del servidor: {e}"}), 500
-# ---
-# --- FIN DE SECCIÓN MODIFICADA ---
-# ---
 
 @app.route('/api/historial', methods=['GET'])
 def historial():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM consultas ORDER BY fecha_consulta DESC")
-    rows = cursor.fetchall()
-    conn.close()
-    historial = []
-    for r in rows:
-        historial.append({
-            "id": r[0], "placa": r[1], "marca": r[2], "modelo": r[3],
-            "uso": r[4], "propietario": r[5], "imagen_url": r[6],
-            "fecha_consulta": r[7], "observaciones": r[8] or ""
-        })
-    return jsonify({"status": "success", "historial": historial})
+    try:
+        with get_db_session() as db:
+            rows = db.query(Consulta).order_by(Consulta.fecha_consulta.desc()).all()
+            historial = []
+            for r in rows:
+                historial.append({
+                    "id": r.id, "placa": r.placa, "marca": r.marca, "modelo": r.modelo,
+                    "uso": r.uso, "propietario": r.propietario, "imagen_url": r.imagen_url,
+                    "fecha_consulta": r.fecha_consulta.strftime("%Y-%m-%d %H:%M:%S"), 
+                    "observaciones": r.observaciones or ""
+                })
+            return jsonify({"status": "success", "historial": historial})
+    except Exception as e:
+        print(f"❌ Error en historial: {e}")
+        return jsonify({"status": "error", "message": "Error al cargar historial"}), 500
 
 @app.route('/api/observacion/<int:id>', methods=['PUT'])
 def actualizar_observacion_api(id):
-    data = request.get_json()
-    obs = data.get("observacion", "")
-    actualizar_observacion(id, obs)
-    return jsonify({"status": "success"})
+    try:
+        data = request.get_json()
+        obs = data.get("observacion", "")
+        actualizar_observacion(id, obs)
+        return jsonify({"status": "success"})
+    except Exception as e:
+        print(f"❌ Error en actualizar_observacion_api: {e}")
+        return jsonify({"status": "error", "message": "Error interno"}), 500
+
 
 @app.route('/api/historial/<int:id>', methods=['DELETE'])
 def eliminar_registro(id):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM consultas WHERE id = ?", (id,))
-    conn.commit()
-    conn.close()
-    return jsonify({"status": "success", "message": f"Registro {id} eliminado"})
+    try:
+        with get_db_session() as db:
+            consulta = db.query(Consulta).filter(Consulta.id == id).first()
+            if consulta:
+                db.delete(consulta)
+                db.commit()
+                return jsonify({"status": "success", "message": f"Registro {id} eliminado"})
+            else:
+                return jsonify({"status": "error", "message": "Registro no encontrado"}), 404
+    except Exception as e:
+        print(f"❌ Error al eliminar: {e}")
+        return jsonify({"status": "error", "message": "Error interno"}), 500
+
 
 @app.route('/api/historial/exportar', methods=['GET'])
 def exportar_historial():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM consultas ORDER BY fecha_consulta DESC")
-    rows = cursor.fetchall()
-    conn.close()
-    csv_data = "ID,Placa,Marca,Modelo,Uso,Propietario,Fecha,Observaciones\n"
-    for r in rows:
-        csv_data += f"{r[0]},{r[1]},{r[2]},{r[3]},{r[4]},{r[5]},{r[7]},{r[8]}\n"
-    response = app.response_class(
-        response=csv_data,
-        mimetype='text/csv',
-        headers={"Content-Disposition": "attachment;filename=historial_consultas.csv"}
-    )
-    return response
+    try:
+        with get_db_session() as db:
+            rows = db.query(Consulta).order_by(Consulta.fecha_consulta.desc()).all()
+            csv_data = "ID,Placa,Marca,Modelo,Uso,Propietario,Fecha,Observaciones\n"
+            for r in rows:
+                csv_data += f"{r.id},{r.placa},{r.marca},{r.modelo},{r.uso},{r.propietario},{r.fecha_consulta.strftime('%Y-%m-%d %H:%M:%S')},{r.observaciones}\n"
+            response = app.response_class(
+                response=csv_data,
+                mimetype='text/csv',
+                headers={"Content-Disposition": "attachment;filename=historial_consultas.csv"}
+            )
+            return response
+    except Exception as e:
+        print(f"❌ Error al exportar: {e}")
+        return jsonify({"status": "error", "message": "Error al exportar datos"}), 500
 
 @app.route('/api/reportar', methods=['POST'])
 def reportar_vehiculo():
-    data = request.get_json()
-    placa = data.get("placa", "").strip().upper()
-    descripcion = data.get("descripcion", "").strip()
-    if not placa or not descripcion:
-        return jsonify({"status": "error", "message": "Placa y descripción requeridas"}), 400
-    guardar_reporte(placa, descripcion)
-    return jsonify({"status": "success", "message": f"Reporte registrado para {placa}"})
+    try:
+        data = request.get_json()
+        placa = data.get("placa", "").strip().upper()
+        descripcion = data.get("descripcion", "").strip()
+        if not placa or not descripcion:
+            return jsonify({"status": "error", "message": "Placa y descripción requeridas"}), 400
+        guardar_reporte(placa, descripcion)
+        return jsonify({"status": "success", "message": f"Reporte registrado para {placa}"})
+    except Exception as e:
+        print(f"❌ Error al reportar: {e}")
+        return jsonify({"status": "error", "message": "Error interno"}), 500
 
 if __name__ == "__main__":
-    import os
-    port = int(os.environ.get("PORT", 10000))  # Render asigna el puerto automáticamente
-    app.run(host="0.0.0.0", port=port, debug=False)
+    # Esta sección solo se usa para pruebas locales, NO en Render
+    print("Iniciando en modo de desarrollo local (no usar en Render)...")
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, debug=True)
