@@ -27,7 +27,7 @@ app = Flask(__name__, template_folder=TEMPLATES_DIR, static_folder=STATIC_DIR)
 CORS(app)
 
 # Leemos desde variables de entorno
-API_USERNAME = os.environ.get("API_USERNAME", "Rafael31") 
+API_USERNAME = os.environ.get("API_USERNAME", "Rafael32") 
 URL_API_PERU = "https://www.regcheck.org.uk/api/reg.asmx/CheckPeru"
 
 
