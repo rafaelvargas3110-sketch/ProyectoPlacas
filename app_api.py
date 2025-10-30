@@ -93,11 +93,11 @@ inicializar_db()
 
 # === CARGA DE MODELOS ===
 try:
-    MODELO_DETECTOR = YOLO(os.path.join(BASE_DIR, "best.pt"))
+    MODELO_DETECTOR = YOLO(os.path.join(BASE_DIR, "best.pt")) # <--- AQUÍ
     OCR_READER = PaddleOCR(use_textline_orientation=True, lang="en")
     print("✅ Modelos cargados correctamente.")
 except Exception as e:
-    print(f"❌ ERROR al cargar modelos: {e}")
+    print(f"❌ ERROR al cargar modelos: {e}") # <--- Este error está en tus logs
     MODELO_DETECTOR = None
     OCR_READER = None
 
