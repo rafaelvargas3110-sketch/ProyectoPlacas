@@ -3,5 +3,5 @@ services:
     name: proyecto-placas
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app_api:app --bind 0.0.0.0:$PORT
+    startCommand: python app_api.py
     plan: free
